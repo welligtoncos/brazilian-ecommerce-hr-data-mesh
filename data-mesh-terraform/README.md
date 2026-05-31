@@ -74,7 +74,7 @@ Este repositório modela um cenário típico e mostra como a AWS organiza isso d
 | `dominio=rh/raw/funcionarios/` | CSV IBM HR Attrition |
 | `dominio=rh/refined/funcionarios/` | Saída ETL RH (Parquet) |
 | `scripts/` | Scripts PySpark dos Glue Jobs |
-| `athena-results/` | Resultados de queries Athena |
+| `data-mesh-athena-results-dev/results/` | Resultados Athena (bucket dedicado, workgroup `wg-analytics`) |
 
 ---
 
@@ -129,14 +129,14 @@ data-mesh-terraform/
     │   ├── variables.tf
     │   └── outputs.tf
     ├── iam/                           # roles Glue + analytics
-    ├── lakeformation/                 # registro do bucket
+    ├── lakeformation/                 # registro S3 + permissions.tf (grants LF)
     ├── glue/
     │   ├── catalog.tf                 # vendas_db, rh_db
+    │   ├── tables.tf                  # vendas_por_categoria, funcionarios
     │   ├── job.tf                     # Glue Jobs ETL
-    │   ├── crawler.tf                 # Glue Crawlers
-    │   ├── variables.tf
-    │   └── outputs.tf
-    └── athena/                        # workgroup + bucket de resultados
+    │   └── crawler.tf                 # Glue Crawlers
+    └── athena/                        # wg-analytics + bucket de resultados
+scripts/                               # validate-e2e, run-cross-domain-query, queries/
 ```
 
 ---
@@ -145,13 +145,36 @@ data-mesh-terraform/
 
 ### 1. Prepare os datasets
 
-Coloque os arquivos em `data/`. O repositório inclui **CSVs de amostra** (1 linha); substitua pelos datasets reais:
+Coloque os arquivos em `data/`. Do pacote [Olist Kaggle](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce) use **apenas estes dois** (o job não usa `orders`, `customers`, etc.):
 
-| Arquivo local | Origem |
-|---------------|--------|
-| `olist_order_items_dataset.csv` | [Olist Kaggle](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce) |
-| `olist_products_dataset.csv` | mesmo dataset |
-| `WA_Fn-UseC_-HR-Employee-Attrition.csv` | [IBM HR Kaggle](https://www.kaggle.com/datasets/pavansubhasht/ibm-hr-analytics-attrition-label) |
+| Arquivo local | Arquivo no ZIP Olist | Tamanho típico |
+|---------------|----------------------|----------------|
+| `olist_order_items_dataset.csv` | `olist_order_items_dataset.csv` | ~15 MB |
+| `olist_products_dataset.csv` | `olist_products_dataset.csv` | ~2 MB |
+| `WA_Fn-UseC_-HR-Employee-Attrition.csv` | exportação própria ou [IBM HR Kaggle](https://www.kaggle.com/datasets/pavansubhasht/ibm-hr-analytics-attrition-label) | ~90 KB+ |
+
+> CSVs grandes costumam ficar fora do Git. Mantenha-os em `data/` localmente e suba com `terraform apply` ou `aws s3 cp`.
+
+#### Planilha RH com menos colunas
+
+O job `job_rh_funcionarios.py` aceita o CSV **completo do Kaggle** ou uma planilha reduzida, desde que mantenha estes nomes de coluna (inglês, como no IBM):
+
+| Coluna na planilha | Uso no Parquet / Athena |
+|--------------------|-------------------------|
+| `Department` | `departamento` |
+| `Age` | `idade` |
+| `Attrition` | `rotatividade` |
+| `JobSatisfaction` | `satisfacao` |
+| `MonthlyIncome` | `faixa_salarial` (baixa / media / alta) |
+| `YearsAtCompany` | `anos_empresa` |
+| `EducationField` | `cargo` (se não houver `JobRole`) |
+| `EmployeeNumber` | `employee_id` (opcional; sem ele, o job gera ID por hash) |
+| `Gender` | `genero` (opcional; default `N/D`) |
+| `JobRole` | `cargo` (prioridade sobre `EducationField`) |
+
+Colunas extras (`EnvironmentSatisfaction`, `WorkLifeBalance`, etc.) são ignoradas pelo ETL — podem permanecer no CSV.
+
+Salve o arquivo como `data/WA_Fn-UseC_-HR-Employee-Attrition.csv` (nome fixo usado no S3 e no Glue Job).
 
 ### 2. Configure variáveis
 
@@ -213,23 +236,54 @@ aws glue get-job-runs --job-name rh-funcionarios --max-results 1
 
 Esperado: `"JobRunState": "SUCCEEDED"`.
 
-### 3. Executar Crawlers (após jobs concluírem)
+### 3. Crawlers (opcional)
+
+As tabelas `vendas_db.vendas_por_categoria` e `rh_db.funcionarios` já são criadas pelo Terraform (`modules/glue/tables.tf`). Os crawlers são opcionais para refrescar metadados:
 
 ```powershell
 aws glue start-crawler --name crawler-vendas
 aws glue start-crawler --name crawler-rh
 ```
 
-Verificar tabelas catalogadas:
+### 4. Validar no Athena (dados reais)
 
-```powershell
-aws glue get-tables --database-name vendas_db
-aws glue get-tables --database-name rh_db
+**Console:** região `us-east-1`, workgroup **`wg-analytics`**, assumir role **`data-mesh-role-analytics-dev`**.
+
+#### Queries de confirmação
+
+```sql
+-- Vendas (Olist): deve retornar ~74 categorias e receita ~13,6 mi
+SELECT
+  COUNT(*) AS categorias,
+  CAST(SUM(total_receita) AS DECIMAL(18,2)) AS receita_total,
+  SUM(qtd_itens) AS itens
+FROM vendas_db.vendas_por_categoria;
+
+-- RH: deve retornar 1470 funcionários e 3 departamentos
+SELECT
+  COUNT(*) AS funcionarios,
+  COUNT(DISTINCT departamento) AS departamentos
+FROM rh_db.funcionarios;
+
+-- Amostra
+SELECT product_category_name, total_receita, qtd_itens
+FROM vendas_db.vendas_por_categoria
+ORDER BY total_receita DESC
+LIMIT 5;
+
+SELECT departamento, cargo, satisfacao, rotatividade
+FROM rh_db.funcionarios
+LIMIT 5;
 ```
 
-### 4. Consultar no Athena (Sprint 3)
+| Métrica | Valor esperado (dataset real validado) |
+|---------|----------------------------------------|
+| Categorias Olist | **74** |
+| Receita total | **~13.591.643,70** |
+| Funcionários RH | **1470** |
+| Departamentos RH | **3** (Sales, Research & Development, Human Resources) |
 
-Após os crawlers, use o Console Athena ou CLI. Os nomes das tabelas dependem do que o crawler inferir a partir do Parquet.
+Query cross-domínio completa: `scripts/queries/cross-domain-vendas-rh.sql` ou `bash scripts/run-cross-domain-query.sh`.
 
 ---
 
@@ -246,29 +300,30 @@ Após os crawlers, use o Console Athena ou CLI. Os nomes das tabelas dependem do
 | `glue_job_rh_name` | Job `rh-funcionarios` |
 | `crawler_vendas_name` | Crawler `crawler-vendas` |
 | `crawler_rh_name` | Crawler `crawler-rh` |
+| `athena_workgroup_name` | Workgroup `wg-analytics` |
+| `athena_results_bucket` | Bucket `data-mesh-athena-results-dev` |
 
 ---
 
 ## Validação
 
-Este projeto **não inclui testes automatizados** (Terratest, Checkov, etc.). A validação é manual:
+### Scripts (recomendado)
 
-### Infraestrutura (Terraform)
-
-```powershell
-terraform validate    # sintaxe HCL
-terraform plan        # drift — esperado: No changes
+```bash
+cd /c/welligton-aws/project-glue/data-mesh-terraform
+unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+bash scripts/validate-e2e.sh
+bash scripts/run-cross-domain-query.sh
 ```
 
-### Funcional (AWS CLI)
+### Checks rápidos (CLI)
 
 | Check | Comando | Esperado |
 |-------|---------|----------|
-| CSVs no S3 | `aws s3 ls s3://meu-datalake-mesh/dominio=vendas/raw/ --recursive` | 2 CSVs Olist |
-| Parquet refinado | `aws s3 ls s3://meu-datalake-mesh/dominio=vendas/refined/ --recursive` | `.parquet` |
+| CSVs no S3 | `aws s3 ls s3://meu-datalake-mesh/dominio=vendas/raw/order_items/` | ~14,7 MiB `olist_order_items_dataset.csv` |
+| Parquet refinado | `aws s3 ls s3://meu-datalake-mesh/dominio=rh/refined/funcionarios/` | `.parquet` ~105 KiB |
 | Jobs OK | `aws glue get-job-runs --job-name vendas-por-categoria --max-results 1` | `SUCCEEDED` |
-| LF registrado | `aws lakeformation list-resources` | ARN do bucket |
-| Tabelas catalogadas | `aws glue get-tables --database-name vendas_db` | ≥ 1 tabela (após crawler) |
+| Athena vendas/RH | queries SQL na seção **Validar no Athena** acima | 74 categorias / 1470 funcionários |
 
 ---
 
@@ -308,34 +363,25 @@ A policy `AWSLakeFormationDataAdmin` nega essa ação por design. O módulo `lak
 
 ### Crawler: `Unsupported option CombineSimilarSchemas`
 
-O valor correto na API do Glue é `CombineCompatibleSchemas`:
+Use `CombineCompatibleSchemas` em `modules/glue/crawler.tf`.
 
-```hcl
-configuration = jsonencode({
-  Version = 1.0
-  Grouping = {
-    TableGroupingPolicy = "CombineCompatibleSchemas"
-  }
-})
+### Athena: `rh_db.funcionarios` retorna 0 linhas
+
+A tabela não deve ter `partition_keys` no Catálogo se o Parquet não for particionado. O projeto define o schema em `modules/glue/tables.tf` **sem** partições. Se aparecer 0 linhas após o job, confira:
+
+```powershell
+aws glue get-table --database-name rh_db --name funcionarios --query "Table.PartitionKeys"
 ```
 
----
+Esperado: `[]`. Depois rode `terraform apply` e teste `SELECT COUNT(*) FROM rh_db.funcionarios` (esperado **1470** com o HR real).
 
-## Validação E2E (scripts)
-
-No **Git Bash**, use caminho Unix (não `cd c:\...`):
-
-```bash
-cd /c/welligton-aws/project-glue/data-mesh-terraform
-bash scripts/validate-e2e.sh
-bash scripts/run-cross-domain-query.sh
-```
+### Validação E2E: falsos `[FAIL]`
 
 | Sintoma | Causa | Ação |
 |---------|--------|------|
-| S3/Glue/workgroup `[FAIL]` com tudo existindo | Terminal com credenciais da `role-analytics` | `unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN` ou abra terminal novo |
-| `AssumeRole` negado na própria role-analytics | Mesma sessão já assumida | Normal — o script detecta e pula; use usuário IAM para seções 2–6 |
-| `faixa_salarial` acessível no Athena | `IAM_ALLOWED_PRINCIPALS` nos defaults do LF | Rode como **root**: `bash scripts/enable-lakeformation-only-mode.sh` |
+| S3/Glue/workgroup `[FAIL]` com tudo existindo | Terminal com credenciais da `role-analytics` | `unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN` |
+| `AssumeRole` negado na própria role-analytics | Sessão já assumida | Normal — use usuário IAM para checks 2–6 |
+| `faixa_salarial` acessível no Athena | `IAM_ALLOWED_PRINCIPALS` ativo no LF | `bash scripts/enable-lakeformation-only-mode.sh` como root |
 
 ---
 
@@ -369,12 +415,15 @@ aws glue start-crawler --name crawler-rh
 
 ---
 
-## Sprint 3 (aplicado)
+## Status do projeto
 
-- Workgroup Athena `wg-analytics` + bucket de resultados
-- Lake Formation: produtores, `role-analytics` (tabela vendas + colunas RH)
-- Scripts: `validate-e2e.sh`, `validate-sprint3.sh`, `run-cross-domain-query.sh`
-- Column-level em `rh_db.funcionarios` exige modo LF-only (sem `IAM_ALLOWED_PRINCIPALS`)
+| Item | Estado |
+|------|--------|
+| Infra Terraform (Sprints 1–3) | Aplicada |
+| Datasets reais Olist + RH em S3 | Validados |
+| Glue Jobs `vendas-por-categoria` / `rh-funcionarios` | `SUCCEEDED` |
+| Athena `wg-analytics` + queries de contagem | Validado (74 categorias, 1470 funcionários) |
+| Column-level `faixa_salarial` | Requer LF-only (`IAM_ALLOWED_PRINCIPALS` desligado) |
 
 ---
 

@@ -12,8 +12,8 @@ resource "aws_glue_job" "vendas_por_categoria" {
 
   glue_version      = "4.0"
   worker_type       = "G.1X"
-  number_of_workers = 2
-  timeout           = 10
+  number_of_workers = 4
+  timeout           = 30
   max_retries       = 0
 
   command {

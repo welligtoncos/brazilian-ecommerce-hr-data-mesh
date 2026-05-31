@@ -119,9 +119,4 @@ resource "aws_glue_catalog_table" "funcionarios" {
       type = "date"
     }
   }
-
-  partition_keys {
-    name = "departamento_part"
-    type = "string"
-  }
 }

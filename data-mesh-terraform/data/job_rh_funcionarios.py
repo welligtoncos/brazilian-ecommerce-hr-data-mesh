@@ -24,19 +24,48 @@ raw = spark.read.option("header", True).csv(
     f"{input_path}funcionarios/WA_Fn-UseC_-HR-Employee-Attrition.csv"
 )
 
+cols = set(raw.columns)
+
+
+def pick(*candidates, default=None):
+    for name in candidates:
+        if name in cols:
+            return F.col(name)
+    if default is not None:
+        return F.lit(default)
+    return F.lit(None)
+
+
+if "EmployeeNumber" in cols:
+    employee_id = pick("EmployeeNumber").cast("string")
+else:
+    employee_id = F.sha2(
+        F.concat_ws(
+            "|",
+            pick("Age", default=""),
+            pick("Department", default=""),
+            pick("MonthlyIncome", default=""),
+            pick("YearsAtCompany", default=""),
+            pick("Attrition", default=""),
+        ),
+        256,
+    )
+
+cargo_expr = pick("JobRole", "EducationField", default="N/D")
+
 funcionarios = (
-    raw.withColumnRenamed("EmployeeNumber", "employee_id")
-    .withColumnRenamed("Department", "departamento")
-    .withColumnRenamed("JobRole", "cargo")
-    .withColumnRenamed("Age", "idade")
-    .withColumnRenamed("Gender", "genero")
-    .withColumnRenamed("YearsAtCompany", "anos_empresa")
-    .withColumnRenamed("JobSatisfaction", "satisfacao")
-    .withColumnRenamed("Attrition", "rotatividade")
+    raw.withColumn("employee_id", employee_id)
+    .withColumn("departamento", pick("Department", default="N/D"))
+    .withColumn("cargo", cargo_expr)
+    .withColumn("idade", pick("Age").cast("int"))
+    .withColumn("genero", pick("Gender", default="N/D"))
+    .withColumn("anos_empresa", pick("YearsAtCompany").cast("int"))
+    .withColumn("satisfacao", pick("JobSatisfaction").cast("int"))
+    .withColumn("rotatividade", pick("Attrition", default="No"))
     .withColumn(
         "faixa_salarial",
-        F.when(F.col("MonthlyIncome").cast("int") < 5000, "baixa")
-        .when(F.col("MonthlyIncome").cast("int") < 10000, "media")
+        F.when(pick("MonthlyIncome").cast("int") < 5000, "baixa")
+        .when(pick("MonthlyIncome").cast("int") < 10000, "media")
         .otherwise("alta"),
     )
     .withColumn("total_funcionarios", F.lit(1))

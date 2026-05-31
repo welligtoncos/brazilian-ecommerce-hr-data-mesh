@@ -20,10 +20,12 @@ job.init(args["JOB_NAME"], args)
 input_path = args["INPUT_PATH"]
 output_path = args["OUTPUT_PATH"]
 
-order_items = spark.read.option("header", True).csv(
+csv_opts = {"header": True, "quote": '"', "escape": '"'}
+
+order_items = spark.read.options(**csv_opts).csv(
     f"{input_path}order_items/olist_order_items_dataset.csv"
 )
-products = spark.read.option("header", True).csv(
+products = spark.read.options(**csv_opts).csv(
     f"{input_path}products/olist_products_dataset.csv"
 )
 
