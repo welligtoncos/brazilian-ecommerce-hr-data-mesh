@@ -391,6 +391,168 @@ Query cross-domínio completa: `scripts/queries/cross-domain-vendas-rh.sql` ou `
 
 ---
 
+## Queries para o time de negócios (Athena)
+
+O time de negócios **não precisa rodar Glue nem Terraform**. Basta o **Console Athena** (ou CLI) com:
+
+| Configuração | Valor |
+|--------------|--------|
+| Região | `us-east-1` |
+| Workgroup | `wg-analytics` |
+| Catálogo | `AwsDataCatalog` |
+| Role | `data-mesh-role-analytics-dev` (via `sts:AssumeRole` no usuário IAM) |
+
+**Tabelas disponíveis**
+
+| Tabela | Conteúdo |
+|--------|----------|
+| `vendas_db.vendas_por_categoria` | Receita e quantidade por categoria Olist |
+| `rh_db.funcionarios` | Funcionários (1 linha por pessoa), sem coluna salarial |
+
+> **Governança:** `faixa_salarial` existe no lake, mas a role de negócios **não** pode consultá-la (Lake Formation). Demais colunas de RH listadas nas permissões do projeto estão liberadas.
+
+Arquivo com todas as queries abaixo: `scripts/queries/negocios-athena.sql`.
+
+---
+
+### 1. Painel executivo — KPIs da empresa
+
+**Objetivo:** visão única de volume de vendas (categorias, receita, itens) e panorama de RH (headcount e satisfação média) para reuniões de diretoria.
+
+```sql
+SELECT
+  (SELECT COUNT(*) FROM vendas_db.vendas_por_categoria) AS categorias_vendidas,
+  (SELECT CAST(SUM(total_receita) AS DECIMAL(18, 2)) FROM vendas_db.vendas_por_categoria) AS receita_total,
+  (SELECT SUM(qtd_itens) FROM vendas_db.vendas_por_categoria) AS itens_vendidos,
+  (SELECT COUNT(*) FROM rh_db.funcionarios) AS total_funcionarios,
+  (SELECT ROUND(AVG(satisfacao), 2) FROM rh_db.funcionarios) AS satisfacao_media_empresa;
+```
+
+---
+
+### 2. Vendas — categorias que mais faturam
+
+**Objetivo:** priorizar categorias de produto com maior receita e entender ticket médio por item (receita ÷ quantidade de itens).
+
+```sql
+SELECT
+  product_category_name AS categoria,
+  total_receita,
+  qtd_itens,
+  ROUND(total_receita / NULLIF(qtd_itens, 0), 2) AS ticket_medio_item
+FROM vendas_db.vendas_por_categoria
+ORDER BY total_receita DESC
+LIMIT 20;
+```
+
+---
+
+### 3. Vendas — concentração da receita (top 10)
+
+**Objetivo:** medir dependência do faturamento nas poucas categorias líderes (% da receita total nas 10 maiores).
+
+```sql
+WITH tot AS (
+  SELECT SUM(total_receita) AS receita_empresa
+  FROM vendas_db.vendas_por_categoria
+),
+top10 AS (
+  SELECT SUM(total_receita) AS receita_top10
+  FROM (
+    SELECT total_receita
+    FROM vendas_db.vendas_por_categoria
+    ORDER BY total_receita DESC
+    LIMIT 10
+  )
+)
+SELECT
+  receita_top10,
+  receita_empresa,
+  ROUND(100.0 * receita_top10 / receita_empresa, 1) AS pct_receita_top10
+FROM top10, tot;
+```
+
+---
+
+### 4. RH — satisfação e tempo de casa por departamento
+
+**Objetivo:** comparar departamentos em engajamento (`satisfacao`) e retenção (`anos_empresa` médio).
+
+```sql
+SELECT
+  departamento,
+  COUNT(*) AS funcionarios,
+  ROUND(AVG(satisfacao), 2) AS media_satisfacao,
+  ROUND(AVG(anos_empresa), 1) AS media_anos_empresa
+FROM rh_db.funcionarios
+GROUP BY departamento
+ORDER BY funcionarios DESC;
+```
+
+---
+
+### 5. RH — taxa de rotatividade por departamento
+
+**Objetivo:** identificar áreas com maior proporção de saídas (`Attrition = Yes` no raw → `total_saidas` no refined).
+
+```sql
+SELECT
+  departamento,
+  COUNT(*) AS funcionarios,
+  SUM(total_saidas) AS saidas,
+  ROUND(100.0 * SUM(total_saidas) / COUNT(*), 1) AS pct_rotatividade
+FROM rh_db.funcionarios
+GROUP BY departamento
+ORDER BY pct_rotatividade DESC;
+```
+
+---
+
+### 6. RH — alertas de baixa satisfação
+
+**Objetivo:** listar combinações departamento/cargo com satisfação média ≤ 2 para ações de people analytics.
+
+```sql
+SELECT
+  departamento,
+  cargo,
+  COUNT(*) AS qtd,
+  ROUND(AVG(satisfacao), 2) AS media_satisfacao
+FROM rh_db.funcionarios
+GROUP BY departamento, cargo
+HAVING AVG(satisfacao) <= 2
+ORDER BY media_satisfacao, qtd DESC;
+```
+
+---
+
+### 7. Cross-domínio — receita × clima do time
+
+**Objetivo:** cruzar categorias de venda (via mapa de negócio) com satisfação e tamanho do time por departamento — insight central do data mesh.
+
+**Pergunta de negócio:** *“Áreas com mais receita nas categorias mapeadas têm times mais satisfeitos?”*
+
+Use a query completa em `scripts/queries/cross-domain-vendas-rh.sql` ou execute:
+
+```bash
+bash scripts/run-cross-domain-query.sh
+```
+
+O mapa `categoria → departamento` é **regra de negócio** definida no SQL (não vem do Olist). Categorias fora do mapa não entram neste cruzamento — amplie o `VALUES` no SQL conforme a estratégia comercial.
+
+---
+
+### Qual query usar por área
+
+| Área | Queries | Objetivo resumido |
+|------|---------|-------------------|
+| Diretoria | 1, 7 | KPIs globais + visão integrada vendas × RH |
+| Comercial / Vendas | 2, 3 | Ranking de categorias e concentração de receita |
+| RH / People | 4, 5, 6 | Satisfação, rotatividade e alertas por departamento |
+| Analytics | 7 (+ variações do mapa) | Cruzamentos customizados no mesmo padrão LF |
+
+---
+
 ## Outputs do Terraform
 
 | Output | Descrição |
