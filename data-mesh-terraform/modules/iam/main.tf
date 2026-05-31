@@ -54,10 +54,11 @@ resource "aws_iam_role_policy" "glue_vendas" {
         Sid    = "WriteVendasRefined"
         Effect = "Allow"
         Action = [
-          "s3:PutObject"
+          "s3:PutObject",
+          "s3:DeleteObject"
         ]
         Resource = [
-          "${var.bucket_arn}/dominio=vendas/refined/*"
+          "${var.bucket_arn}/dominio=vendas/*"
         ]
       },
       {
@@ -124,13 +125,14 @@ resource "aws_iam_role_policy" "glue_rh" {
         ]
       },
       {
-        Sid    = "WriteRhRefined"
+        Sid    = "S3RHRefined"
         Effect = "Allow"
         Action = [
-          "s3:PutObject"
+          "s3:PutObject",
+          "s3:DeleteObject"
         ]
         Resource = [
-          "${var.bucket_arn}/dominio=rh/refined/*"
+          "${var.bucket_arn}/dominio=rh/*"
         ]
       },
       {
@@ -147,21 +149,33 @@ resource "aws_iam_role_policy" "glue_rh" {
   })
 }
 
-resource "aws_iam_role" "analytics" {
-  name = "${var.project_name}-role-analytics-${var.environment}"
+data "aws_iam_policy_document" "analytics_trust" {
+  statement {
+    effect  = "Allow"
+    actions = ["sts:AssumeRole"]
 
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Principal = {
-          Service = "iam.amazonaws.com"
-        }
-        Action = "sts:AssumeRole"
-      }
-    ]
-  })
+    principals {
+      type        = "Service"
+      identifiers = ["glue.amazonaws.com"]
+    }
+  }
+
+  statement {
+    effect  = "Allow"
+    actions = ["sts:AssumeRole"]
+
+    principals {
+      type = "AWS"
+      identifiers = [
+        "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root",
+      ]
+    }
+  }
+}
+
+resource "aws_iam_role" "analytics" {
+  name               = "${var.project_name}-role-analytics-${var.environment}"
+  assume_role_policy = data.aws_iam_policy_document.analytics_trust.json
 
   tags = {
     Project     = var.project_name
@@ -181,18 +195,24 @@ resource "aws_iam_role_policy" "analytics" {
         Effect = "Allow"
         Action = [
           "athena:StartQueryExecution",
-          "athena:GetQueryResults"
+          "athena:GetQueryExecution",
+          "athena:GetQueryResults",
+          "athena:StopQueryExecution"
         ]
         Resource = "*"
       },
       {
-        Sid    = "ReadAthenaResults"
+        Sid    = "AthenaResultsBucket"
         Effect = "Allow"
         Action = [
-          "s3:GetObject"
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:ListBucket",
+          "s3:GetBucketLocation"
         ]
         Resource = [
-          "${var.bucket_arn}/athena-results/*"
+          "arn:aws:s3:::${var.project_name}-athena-results-${var.environment}",
+          "arn:aws:s3:::${var.project_name}-athena-results-${var.environment}/*"
         ]
       },
       {
@@ -200,7 +220,17 @@ resource "aws_iam_role_policy" "analytics" {
         Effect = "Allow"
         Action = [
           "glue:GetTable",
-          "glue:GetDatabase"
+          "glue:GetDatabase",
+          "glue:GetPartitions"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid    = "LakeFormationDataAccess"
+        Effect = "Allow"
+        Action = [
+          "lakeformation:GetDataAccess",
+          "lakeformation:GetMetadataAccess"
         ]
         Resource = "*"
       }

@@ -1,0 +1,10 @@
+{
+  "DataLakeSettings": {
+    "DataLakeAdmins": [
+      { "DataLakePrincipalIdentifier": "arn:aws:iam::303238378103:root" },
+      { "DataLakePrincipalIdentifier": "arn:aws:iam::303238378103:user/usuario-dados" }
+    ],
+    "CreateDatabaseDefaultPermissions": [],
+    "CreateTableDefaultPermissions": []
+  }
+}

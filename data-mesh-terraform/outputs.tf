@@ -52,3 +52,18 @@ output "crawler_rh_name" {
   description = "Name of the Glue crawler for the RH domain"
   value       = module.glue.crawler_rh_name
 }
+
+output "athena_workgroup_name" {
+  description = "Name of the Athena workgroup for analytics queries"
+  value       = module.athena.workgroup_name
+}
+
+output "athena_results_bucket" {
+  description = "Name of the S3 bucket for Athena query results"
+  value       = module.athena.athena_results_bucket
+}
+
+output "athena_results_bucket_arn" {
+  description = "ARN of the S3 bucket for Athena query results"
+  value       = module.athena.athena_results_bucket_arn
+}

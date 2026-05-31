@@ -4,7 +4,7 @@ resource "aws_glue_crawler" "vendas" {
   database_name = var.vendas_db_name
 
   s3_target {
-    path = "s3://${var.bucket_name}/dominio=vendas/refined/"
+    path = "s3://${var.bucket_name}/dominio=vendas/refined/vendas_por_categoria/"
   }
 
   configuration = jsonencode({
@@ -32,7 +32,7 @@ resource "aws_glue_crawler" "rh" {
   database_name = var.rh_db_name
 
   s3_target {
-    path = "s3://${var.bucket_name}/dominio=rh/refined/"
+    path = "s3://${var.bucket_name}/dominio=rh/refined/funcionarios/"
   }
 
   configuration = jsonencode({

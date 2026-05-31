@@ -29,10 +29,12 @@ products = spark.read.option("header", True).csv(
 
 vendas = (
     order_items.join(products, on="product_id", how="inner")
-    .withColumn("order_purchase_timestamp", F.lit(None).cast("timestamp"))
     .withColumn("price", F.col("price").cast("double"))
     .groupBy("product_category_name")
-    .agg(F.sum("price").alias("total_vendas"))
+    .agg(
+        F.sum("price").alias("total_receita"),
+        F.count("order_item_id").alias("qtd_itens"),
+    )
 )
 
 vendas.write.mode("overwrite").parquet(output_path)

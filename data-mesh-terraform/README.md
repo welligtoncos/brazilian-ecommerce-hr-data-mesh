@@ -1,12 +1,33 @@
-# Data Mesh — Terraform (Sprint 1 + Sprint 2)
+# Data Mesh — Terraform
 
-Infraestrutura de um Data Mesh simplificado na AWS, provisionada com Terraform.
+Infraestrutura de um **Data Mesh simplificado** na AWS (Vendas + RH), provisionada com Terraform: domínios isolados, consumo governado e consultas analíticas sem expor dados sensíveis.
 
 | Sprint | Entrega |
 |--------|---------|
 | **Sprint 1** | S3 data lake, IAM roles, Lake Formation, Glue Catalog (`vendas_db`, `rh_db`) |
 | **Sprint 2** | Upload de datasets, Glue Jobs ETL, Glue Crawlers |
-| **Sprint 3** | Permissões Lake Formation, Athena, column-level security (pendente) |
+| **Sprint 3** | Permissões Lake Formation, Athena (`wg-analytics`), column-level security RH |
+
+---
+
+## O que este Data Mesh resolve?
+
+Em muitas empresas, dados de áreas diferentes (vendas, RH, financeiro) ficam em silos: cada time sobe arquivos no S3, cria jobs Glue e tabelas no Catálogo sem padrão comum. Quem consome (BI, analytics, outros times) acaba com **acesso amplo demais** ou **sem acesso nenhum**, e cruzar domínios vira projeto manual e arriscado.
+
+Este repositório modela um cenário típico e mostra como a AWS organiza isso de forma **por domínio**, com **governança centralizada**:
+
+| Problema | Como o projeto aborda |
+|----------|------------------------|
+| Dados brutos espalhados e sem camada confiável | Dois domínios (`vendas`, `rh`) com prefixos S3 `raw/` → jobs Glue → `refined/` em Parquet |
+| Times produtores precisam escrever no lake sem ver dados de outros | Roles IAM por domínio (`role-glue-vendas`, `role-glue-rh`) + grants Lake Formation `ALL` só no próprio database |
+| Analytics precisa cruzar vendas e RH sem virar admin do lake | Role consumidora (`role-analytics`): `SELECT` só na tabela agregada de vendas e colunas permitidas de RH |
+| Dados sensíveis (ex.: faixa salarial) não podem ir para relatórios gerais | Column-level security no Lake Formation: `faixa_salarial` fora do grant da role-analytics (requer modo LF-only; ver validação E2E) |
+| Consultas ad hoc sem padrão de custo/resultado | Workgroup Athena `wg-analytics` com bucket dedicado de resultados e engine v3 |
+| Infra repetida e difícil de reproduzir | Tudo como código (Terraform): bucket, roles, LF, jobs, crawlers, tabelas e workgroup |
+
+**Exemplo concreto:** um analista assume `role-analytics`, roda a query cross-domínio (`scripts/queries/cross-domain-vendas-rh.sql`) e obtém receita por categoria de produto cruzada com departamento e satisfação de RH — **sem** acessar salários nem ter permissão de escrita nos domínios produtores.
+
+**O que não é:** um data mesh corporativo completo (federated governance, data products catalog, SLAs por domínio). É um **lab/prova de conceito** didático, alinhado a certificações e workshops AWS (Glue, Lake Formation, Athena).
 
 ---
 
@@ -31,7 +52,7 @@ Infraestrutura de um Data Mesh simplificado na AWS, provisionada com Terraform.
                               │                    │
                               └──── Crawlers ──────┘
                                         │
-                                   Athena (Sprint 3)
+                                   Athena (wg-analytics)
 ```
 
 ### Fluxo operacional (após `terraform apply`)
@@ -40,7 +61,7 @@ Infraestrutura de um Data Mesh simplificado na AWS, provisionada com Terraform.
 1. CSVs + scripts  →  S3 (raw/ e scripts/)
 2. Glue Jobs       →  S3 (refined/ em Parquet)
 3. Glue Crawlers   →  Glue Catalog (tabelas)
-4. Athena          →  queries analíticas (Sprint 3)
+4. Athena          →  queries analíticas (role-analytics + LF)
 ```
 
 ### Prefixos S3
@@ -115,7 +136,7 @@ data-mesh-terraform/
     │   ├── crawler.tf                 # Glue Crawlers
     │   ├── variables.tf
     │   └── outputs.tf
-    └── athena/                        # Sprint 3 — ainda não conectado
+    └── athena/                        # workgroup + bucket de resultados
 ```
 
 ---
@@ -300,6 +321,24 @@ configuration = jsonencode({
 
 ---
 
+## Validação E2E (scripts)
+
+No **Git Bash**, use caminho Unix (não `cd c:\...`):
+
+```bash
+cd /c/welligton-aws/project-glue/data-mesh-terraform
+bash scripts/validate-e2e.sh
+bash scripts/run-cross-domain-query.sh
+```
+
+| Sintoma | Causa | Ação |
+|---------|--------|------|
+| S3/Glue/workgroup `[FAIL]` com tudo existindo | Terminal com credenciais da `role-analytics` | `unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN` ou abra terminal novo |
+| `AssumeRole` negado na própria role-analytics | Mesma sessão já assumida | Normal — o script detecta e pula; use usuário IAM para seções 2–6 |
+| `faixa_salarial` acessível no Athena | `IAM_ALLOWED_PRINCIPALS` nos defaults do LF | Rode como **root**: `bash scripts/enable-lakeformation-only-mode.sh` |
+
+---
+
 ## Destruir a infraestrutura
 
 ```powershell
@@ -330,12 +369,12 @@ aws glue start-crawler --name crawler-rh
 
 ---
 
-## Próximos passos (Sprint 3)
+## Sprint 3 (aplicado)
 
-- Conectar módulo `athena/` (workgroup + results path)
-- Permissões granulares Lake Formation por domínio
-- Column-level security no domínio RH
-- Consumo via `role-analytics` no Athena
+- Workgroup Athena `wg-analytics` + bucket de resultados
+- Lake Formation: produtores, `role-analytics` (tabela vendas + colunas RH)
+- Scripts: `validate-e2e.sh`, `validate-sprint3.sh`, `run-cross-domain-query.sh`
+- Column-level em `rh_db.funcionarios` exige modo LF-only (sem `IAM_ALLOWED_PRINCIPALS`)
 
 ---
 

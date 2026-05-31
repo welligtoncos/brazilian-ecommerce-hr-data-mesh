@@ -20,9 +20,26 @@ module "iam" {
 module "lakeformation" {
   source = "./modules/lakeformation"
 
-  bucket_arn = module.s3.bucket_arn
+  bucket_arn           = module.s3.bucket_arn
+  bucket_name          = module.s3.bucket_name
+  role_glue_vendas_arn = module.iam.role_glue_vendas_arn
+  role_glue_rh_arn     = module.iam.role_glue_rh_arn
+  role_analytics_arn   = module.iam.role_analytics_arn
+  vendas_db_name       = module.glue.vendas_db_name
+  rh_db_name           = module.glue.rh_db_name
 
-  depends_on = [module.s3]
+  depends_on = [module.s3, module.iam, module.glue]
+}
+
+module "athena" {
+  source = "./modules/athena"
+
+  project_name       = var.project_name
+  environment        = var.environment
+  role_analytics_arn = module.iam.role_analytics_arn
+  bucket_name        = module.s3.bucket_name
+
+  depends_on = [module.iam]
 }
 
 module "glue" {
