@@ -28,9 +28,15 @@ module "lakeformation" {
 module "glue" {
   source = "./modules/glue"
 
-  bucket_name  = module.s3.bucket_name
-  project_name = var.project_name
-  environment  = var.environment
+  bucket_name           = module.s3.bucket_name
+  role_glue_vendas_arn  = module.iam.role_glue_vendas_arn
+  role_glue_rh_arn      = module.iam.role_glue_rh_arn
+  vendas_db_name        = "vendas_db"
+  rh_db_name            = "rh_db"
+  glue_script_vendas_id = module.s3.glue_script_vendas_id
+  glue_script_rh_id     = module.s3.glue_script_rh_id
+  project_name          = var.project_name
+  environment           = var.environment
 
-  depends_on = [module.s3]
+  depends_on = [module.s3, module.iam]
 }

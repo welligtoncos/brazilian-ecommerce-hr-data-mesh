@@ -1,41 +1,57 @@
-# Data Mesh — Sprint 1 (Terraform)
+# Data Mesh — Terraform (Sprint 1 + Sprint 2)
 
-Infraestrutura base de um Data Mesh simplificado na AWS, com:
+Infraestrutura de um Data Mesh simplificado na AWS, provisionada com Terraform.
 
-- **S3** — data lake com prefixos por domínio
-- **IAM** — roles para Glue (Vendas/RH) e consumo analítico (Athena)
-- **Lake Formation** — registro do bucket no catálogo governado
-- **Glue Catalog** — databases `vendas_db` e `rh_db`
-
-> O módulo `athena/` já existe na estrutura, mas será conectado na Sprint 2.
+| Sprint | Entrega |
+|--------|---------|
+| **Sprint 1** | S3 data lake, IAM roles, Lake Formation, Glue Catalog (`vendas_db`, `rh_db`) |
+| **Sprint 2** | Upload de datasets, Glue Jobs ETL, Glue Crawlers |
+| **Sprint 3** | Permissões Lake Formation, Athena, column-level security (pendente) |
 
 ---
 
 ## Arquitetura
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                     data-mesh-terraform                      │
-├──────────┬──────────┬────────────────┬──────────────────────┤
-│  module  │  module  │    module      │      module          │
-│   s3     │   iam    │ lakeformation  │       glue           │
-├──────────┴──────────┴────────────────┴──────────────────────┤
-│  S3 Bucket (dominio=vendas/, dominio=rh/, scripts/, ...)    │
-│  IAM Roles: glue-vendas, glue-rh, analytics                 │
-│  LF: bucket registrado + settings lidas (read-only)         │
-│  Glue Catalog: vendas_db, rh_db                             │
-└─────────────────────────────────────────────────────────────┘
+                         data-mesh-terraform
+┌──────────────────────────────────────────────────────────────────┐
+│  modules/s3          modules/iam         modules/lakeformation   │
+│  · bucket            · role-glue-vendas  · bucket registrado LF   │
+│  · prefixos          · role-glue-rh      · settings (read-only)  │
+│  · datasets (CSV/py) · role-analytics                            │
+├──────────────────────────────────────────────────────────────────┤
+│  modules/glue                                                    │
+│  · databases vendas_db / rh_db                                   │
+│  · jobs: vendas-por-categoria, rh-funcionarios                   │
+│  · crawlers: crawler-vendas, crawler-rh                          │
+└──────────────────────────────────────────────────────────────────┘
+          │                    │                    │
+          ▼                    ▼                    ▼
+     S3 raw/refined      Glue ETL Jobs         Glue Catalog
+                              │                    │
+                              └──── Crawlers ──────┘
+                                        │
+                                   Athena (Sprint 3)
 ```
 
-### Prefixos S3 criados
+### Fluxo operacional (após `terraform apply`)
+
+```
+1. CSVs + scripts  →  S3 (raw/ e scripts/)
+2. Glue Jobs       →  S3 (refined/ em Parquet)
+3. Glue Crawlers   →  Glue Catalog (tabelas)
+4. Athena          →  queries analíticas (Sprint 3)
+```
+
+### Prefixos S3
 
 | Prefixo | Uso |
 |---------|-----|
-| `dominio=vendas/raw/order_items/` | Dados brutos Olist — order items |
-| `dominio=vendas/raw/products/` | Dados brutos Olist — products |
-| `dominio=vendas/refined/` | Camada refinada do domínio Vendas |
-| `dominio=rh/raw/` | Dados brutos IBM HR Attrition |
-| `dominio=rh/refined/` | Camada refinada do domínio RH |
+| `dominio=vendas/raw/order_items/` | CSV Olist — order items |
+| `dominio=vendas/raw/products/` | CSV Olist — products |
+| `dominio=vendas/refined/vendas_por_categoria/` | Saída ETL Vendas (Parquet) |
+| `dominio=rh/raw/funcionarios/` | CSV IBM HR Attrition |
+| `dominio=rh/refined/funcionarios/` | Saída ETL RH (Parquet) |
 | `scripts/` | Scripts PySpark dos Glue Jobs |
 | `athena-results/` | Resultados de queries Athena |
 
@@ -48,128 +64,24 @@ Infraestrutura base de um Data Mesh simplificado na AWS, com:
 | Ferramenta | Versão mínima | Verificação |
 |------------|---------------|-------------|
 | [Terraform](https://developer.hashicorp.com/terraform/install) | >= 1.5 | `terraform version` |
-| [AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) | v2 recomendado | `aws --version` |
+| [AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) | v2 | `aws --version` |
 | PowerShell ou Bash | — | terminal com acesso à AWS |
 
 ### Credenciais AWS
 
-Configure um perfil ou variáveis de ambiente com permissões para criar:
-
-- S3, IAM, Glue Catalog, Lake Formation
-
-Exemplo com AWS CLI:
-
-```bash
+```powershell
 aws configure
 # ou
 aws configure --profile data-mesh
-```
-
-Com perfil nomeado, exporte antes de rodar o Terraform:
-
-```powershell
-# PowerShell
 $env:AWS_PROFILE = "data-mesh"
 ```
 
-```bash
-# Bash
-export AWS_PROFILE=data-mesh
-```
+Permissões mínimas para o Terraform:
 
-### Permissões IAM recomendadas
-
-O usuário/role que executa o Terraform precisa, no mínimo:
-
-- `s3:*` (bucket e objetos)
-- `iam:CreateRole`, `iam:PutRolePolicy`, `iam:AttachRolePolicy`
-- `glue:CreateDatabase`
+- S3, IAM, Glue (databases, jobs, crawlers)
 - `lakeformation:RegisterResource`, `lakeformation:GetDataLakeSettings`
 
-> **Lake Formation — ponto importante:** a policy gerenciada `AWSLakeFormationDataAdmin` **nega explicitamente** `lakeformation:PutDataLakeSettings`. Por isso, este projeto **não tenta alterar** os admins do Lake Formation via Terraform — apenas lê as settings existentes e registra o bucket S3.
-
-Se o Lake Formation ainda não foi configurado na conta, um **administrator/root** deve definir o data lake admin uma vez pelo Console AWS:
-
-1. Lake Formation → **Administrative roles and tasks** → **Data lake administrators**
-2. Adicionar o usuário/role que executará o projeto
-
----
-
-## Instalação e deploy
-
-### 1. Clone ou acesse o diretório do projeto
-
-```powershell
-cd C:\welligton-aws\project-glue\data-mesh-terraform
-```
-
-### 2. Configure as variáveis
-
-Edite `terraform.tfvars`:
-
-```hcl
-aws_region   = "us-east-1"
-bucket_name  = "meu-datalake-mesh"   # deve ser globalmente único no S3
-project_name = "data-mesh"
-environment  = "dev"
-```
-
-**Dica:** se o nome do bucket já existir (na sua conta ou em outra), use um sufixo único:
-
-```hcl
-bucket_name = "meu-datalake-mesh-303238378103"
-```
-
-### 3. Inicialize o Terraform
-
-```powershell
-terraform init
-```
-
-### 4. Valide a configuração
-
-```powershell
-terraform validate
-```
-
-### 5. Gere o plano de execução
-
-```powershell
-# PowerShell — use aspas no -out (ver seção Troubleshooting)
-terraform plan "-out=plan.out"
-```
-
-Revise o plano. Na primeira execução, espere a criação de ~22 recursos.
-
-### 6. Aplique a infraestrutura
-
-```powershell
-terraform apply "plan.out"
-```
-
-Ou, sem salvar plano:
-
-```powershell
-terraform apply
-```
-
-### 7. Confira os outputs
-
-```powershell
-terraform output
-```
-
-Saída esperada:
-
-| Output | Descrição |
-|--------|-----------|
-| `bucket_name` | Nome do bucket S3 |
-| `bucket_arn` | ARN do bucket |
-| `role_glue_vendas_arn` | Role IAM para Glue Jobs do domínio Vendas |
-| `role_glue_rh_arn` | Role IAM para Glue Jobs do domínio RH |
-| `role_analytics_arn` | Role IAM para consumo via Athena |
-| `vendas_db_name` | Database Glue `vendas_db` |
-| `rh_db_name` | Database Glue `rh_db` |
+> **Lake Formation:** a policy `AWSLakeFormationDataAdmin` **nega** `lakeformation:PutDataLakeSettings`. Este projeto lê as settings existentes e registra o bucket — não altera admins via Terraform. Se LF ainda não foi configurado, um **account root** deve definir o data lake admin no Console uma vez.
 
 ---
 
@@ -177,58 +89,165 @@ Saída esperada:
 
 ```
 data-mesh-terraform/
-├── main.tf                 # Orquestração dos módulos
-├── variables.tf            # Variáveis raiz
-├── outputs.tf              # Outputs raiz
-├── versions.tf             # Terraform >= 1.5, AWS provider >= 5.0
-├── terraform.tfvars        # Valores das variáveis (customize aqui)
+├── main.tf
+├── variables.tf
+├── outputs.tf
+├── versions.tf
+├── terraform.tfvars
 ├── README.md
+├── data/                              # arquivos locais enviados ao S3
+│   ├── olist_order_items_dataset.csv
+│   ├── olist_products_dataset.csv
+│   ├── WA_Fn-UseC_-HR-Employee-Attrition.csv
+│   ├── job_vendas_por_categoria.py
+│   └── job_rh_funcionarios.py
 └── modules/
-    ├── s3/                 # Bucket, encryption, versioning, prefixos
-    ├── iam/                # Roles Glue + analytics
-    ├── lakeformation/      # Registro do bucket no LF
-    ├── glue/               # Databases vendas_db e rh_db
-    └── athena/             # Sprint 2 — ainda não conectado no main.tf
+    ├── s3/
+    │   ├── main.tf                    # bucket, encryption, prefixos
+    │   ├── datasets.tf                # upload CSV + scripts
+    │   ├── variables.tf
+    │   └── outputs.tf
+    ├── iam/                           # roles Glue + analytics
+    ├── lakeformation/                 # registro do bucket
+    ├── glue/
+    │   ├── catalog.tf                 # vendas_db, rh_db
+    │   ├── job.tf                     # Glue Jobs ETL
+    │   ├── crawler.tf                 # Glue Crawlers
+    │   ├── variables.tf
+    │   └── outputs.tf
+    └── athena/                        # Sprint 3 — ainda não conectado
 ```
 
 ---
 
-## Verificação pós-deploy
+## Instalação
 
-### S3 — prefixos criados
+### 1. Prepare os datasets
 
-```powershell
-aws s3 ls s3://meu-datalake-mesh/ --recursive
+Coloque os arquivos em `data/`. O repositório inclui **CSVs de amostra** (1 linha); substitua pelos datasets reais:
+
+| Arquivo local | Origem |
+|---------------|--------|
+| `olist_order_items_dataset.csv` | [Olist Kaggle](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce) |
+| `olist_products_dataset.csv` | mesmo dataset |
+| `WA_Fn-UseC_-HR-Employee-Attrition.csv` | [IBM HR Kaggle](https://www.kaggle.com/datasets/pavansubhasht/ibm-hr-analytics-attrition-label) |
+
+### 2. Configure variáveis
+
+Edite `terraform.tfvars`:
+
+```hcl
+aws_region   = "us-east-1"
+bucket_name  = "meu-datalake-mesh"   # globalmente único no S3
+project_name = "data-mesh"
+environment  = "dev"
 ```
 
-### IAM — roles criadas
+Se o bucket já existir na conta, importe-o (ver [Troubleshooting](#troubleshooting)).
+
+### 3. Deploy com Terraform
 
 ```powershell
-aws iam get-role --role-name data-mesh-role-glue-vendas-dev
-aws iam get-role --role-name data-mesh-role-glue-rh-dev
-aws iam get-role --role-name data-mesh-role-analytics-dev
+cd C:\welligton-aws\project-glue\data-mesh-terraform
+
+terraform init
+terraform validate
+terraform plan "-out=plan.out"
+terraform apply "plan.out"
+terraform output
 ```
 
-### Glue Catalog — databases
+> **PowerShell:** use aspas em `-out=plan.out` e `"plan.out"` no apply.
+
+Na primeira execução completa (Sprint 1 + 2), espere ~33 recursos gerenciados.
+
+---
+
+## Operação pós-deploy
+
+O Terraform provisiona a infraestrutura; **jobs e crawlers rodam manualmente** (ou via CI).
+
+### 1. Reenviar dados após trocar CSVs
 
 ```powershell
-aws glue get-database --name vendas_db
-aws glue get-database --name rh_db
+terraform plan "-out=plan.out"
+terraform apply "plan.out"
 ```
 
-### Lake Formation — bucket registrado
+O Terraform detecta mudanças via `filemd5()` e atualiza os objetos no S3.
+
+### 2. Executar Glue Jobs
 
 ```powershell
-aws lakeformation list-resources
+aws glue start-job-run --job-name vendas-por-categoria
+aws glue start-job-run --job-name rh-funcionarios
 ```
 
-Deve listar `arn:aws:s3:::meu-datalake-mesh`.
-
-### Lake Formation — admins (somente leitura)
+Acompanhar:
 
 ```powershell
-aws lakeformation get-data-lake-settings
+aws glue get-job-runs --job-name vendas-por-categoria --max-results 1
+aws glue get-job-runs --job-name rh-funcionarios --max-results 1
 ```
+
+Esperado: `"JobRunState": "SUCCEEDED"`.
+
+### 3. Executar Crawlers (após jobs concluírem)
+
+```powershell
+aws glue start-crawler --name crawler-vendas
+aws glue start-crawler --name crawler-rh
+```
+
+Verificar tabelas catalogadas:
+
+```powershell
+aws glue get-tables --database-name vendas_db
+aws glue get-tables --database-name rh_db
+```
+
+### 4. Consultar no Athena (Sprint 3)
+
+Após os crawlers, use o Console Athena ou CLI. Os nomes das tabelas dependem do que o crawler inferir a partir do Parquet.
+
+---
+
+## Outputs do Terraform
+
+| Output | Descrição |
+|--------|-----------|
+| `bucket_name` / `bucket_arn` | Bucket S3 do data lake |
+| `role_glue_vendas_arn` | Role IAM — Glue Vendas |
+| `role_glue_rh_arn` | Role IAM — Glue RH |
+| `role_analytics_arn` | Role IAM — consumo Athena |
+| `vendas_db_name` / `rh_db_name` | Databases Glue Catalog |
+| `glue_job_vendas_name` | Job `vendas-por-categoria` |
+| `glue_job_rh_name` | Job `rh-funcionarios` |
+| `crawler_vendas_name` | Crawler `crawler-vendas` |
+| `crawler_rh_name` | Crawler `crawler-rh` |
+
+---
+
+## Validação
+
+Este projeto **não inclui testes automatizados** (Terratest, Checkov, etc.). A validação é manual:
+
+### Infraestrutura (Terraform)
+
+```powershell
+terraform validate    # sintaxe HCL
+terraform plan        # drift — esperado: No changes
+```
+
+### Funcional (AWS CLI)
+
+| Check | Comando | Esperado |
+|-------|---------|----------|
+| CSVs no S3 | `aws s3 ls s3://meu-datalake-mesh/dominio=vendas/raw/ --recursive` | 2 CSVs Olist |
+| Parquet refinado | `aws s3 ls s3://meu-datalake-mesh/dominio=vendas/refined/ --recursive` | `.parquet` |
+| Jobs OK | `aws glue get-job-runs --job-name vendas-por-categoria --max-results 1` | `SUCCEEDED` |
+| LF registrado | `aws lakeformation list-resources` | ARN do bucket |
+| Tabelas catalogadas | `aws glue get-tables --database-name vendas_db` | ≥ 1 tabela (após crawler) |
 
 ---
 
@@ -236,25 +255,25 @@ aws lakeformation get-data-lake-settings
 
 ### `Error: Too many command line arguments` (PowerShell)
 
-O PowerShell interpreta `-out=plan.out` como parâmetro próprio. Use aspas:
+```powershell
+terraform plan "-out=plan.out"
+terraform apply "plan.out"
+```
+
+### `Error: Saved plan is stale`
+
+O `plan.out` ficou desatualizado após mudança no state. Gere um plano novo:
 
 ```powershell
 terraform plan "-out=plan.out"
 terraform apply "plan.out"
 ```
 
-Alternativas:
-
-```powershell
-terraform plan -out plan.out
-terraform -- plan -out=plan.out
-```
+Se aparecer `No changes`, a infra já está sincronizada — não é necessário apply.
 
 ### `BucketAlreadyExists`
 
-O bucket já existe na AWS, mas não está no state do Terraform.
-
-**Se o bucket é seu** (mesma conta), importe-o:
+Bucket existe na AWS, mas não no state do Terraform:
 
 ```powershell
 terraform import module.s3.aws_s3_bucket.datalake meu-datalake-mesh
@@ -262,111 +281,79 @@ terraform plan "-out=plan.out"
 terraform apply "plan.out"
 ```
 
-**Se o nome está ocupado por outra conta**, altere `bucket_name` em `terraform.tfvars` e rode `plan` + `apply` novamente.
-
-> Nunca reutilize um `plan.out` gerado **antes** de um import ou mudança de state. Sempre gere um plano novo.
-
 ### `AccessDeniedException: lakeformation:PutDataLakeSettings`
 
-**Causa:** a policy `AWSLakeFormationDataAdmin` contém um **Deny explícito** em `PutDataLakeSettings`. Isso é comportamento intencional da AWS.
+A policy `AWSLakeFormationDataAdmin` nega essa ação por design. O módulo `lakeformation` usa `data "aws_lakeformation_data_lake_settings"` (read-only). Confirme que `modules/lakeformation/main.tf` **não** contém `resource "aws_lakeformation_data_lake_settings"`.
 
-**Solução aplicada neste projeto:** o módulo `lakeformation` usa `data "aws_lakeformation_data_lake_settings"` (somente leitura) em vez de tentar criar/alterar settings.
+### Crawler: `Unsupported option CombineSimilarSchemas`
 
-Se você ainda vê o erro com `aws_lakeformation_data_lake_settings.this`, seu código local está desatualizado. Confirme que `modules/lakeformation/main.tf` contém:
+O valor correto na API do Glue é `CombineCompatibleSchemas`:
 
 ```hcl
-data "aws_lakeformation_data_lake_settings" "current" {}
-
-resource "aws_lakeformation_resource" "datalake" {
-  arn                     = var.bucket_arn
-  use_service_linked_role = true
-}
-```
-
-Depois:
-
-```powershell
-terraform plan "-out=plan.out"
-terraform apply "plan.out"
-```
-
-### Plano mostra recursos a criar, mas apply falha com erro antigo
-
-Você provavelmente aplicou um `plan.out` **desatualizado**. Sempre:
-
-```powershell
-terraform plan "-out=plan.out"
-terraform apply "plan.out"
+configuration = jsonencode({
+  Version = 1.0
+  Grouping = {
+    TableGroupingPolicy = "CombineCompatibleSchemas"
+  }
+})
 ```
 
 ---
 
 ## Destruir a infraestrutura
 
-> **Atenção:** remove bucket, roles, databases e registro no Lake Formation.
-
 ```powershell
 terraform destroy
 ```
 
-Para preservar os dados no S3, esvazie manualmente o bucket ou remova o módulo S3 do destroy com `-target` (uso avançado).
+> Remove bucket, roles, jobs, crawlers, databases e registro no Lake Formation.
 
 ---
 
-## Referência rápida de comandos
+## Referência rápida
 
 ```powershell
-# Ciclo completo
+# Ciclo Terraform
 terraform init
 terraform validate
 terraform plan "-out=plan.out"
 terraform apply "plan.out"
 terraform output
-
-# Ver state
 terraform state list
 
-# Formatar arquivos .tf
-terraform fmt -recursive
+# Pipeline operacional
+aws glue start-job-run --job-name vendas-por-categoria
+aws glue start-job-run --job-name rh-funcionarios
+aws glue start-crawler --name crawler-vendas
+aws glue start-crawler --name crawler-rh
 ```
 
 ---
 
-## Próximos passos (Sprint 2)
+## Próximos passos (Sprint 3)
 
-Os outputs desta sprint serão referenciados nos Glue Jobs:
-
-```hcl
-module.s3.bucket_name
-module.s3.bucket_arn
-module.iam.role_glue_vendas_arn
-module.iam.role_glue_rh_arn
-module.glue.vendas_db_name
-module.glue.rh_db_name
-```
-
-Também será conectado o módulo `athena/` para workgroup de queries analíticas.
+- Conectar módulo `athena/` (workgroup + results path)
+- Permissões granulares Lake Formation por domínio
+- Column-level security no domínio RH
+- Consumo via `role-analytics` no Athena
 
 ---
 
-## Variáveis disponíveis
+## Variáveis
 
 | Variável | Default | Descrição |
 |----------|---------|-----------|
 | `aws_region` | `us-east-1` | Região AWS |
-| `bucket_name` | `meu-datalake-mesh` | Nome do bucket S3 (único globalmente) |
-| `project_name` | `data-mesh` | Nome do projeto (tags e naming) |
-| `environment` | `dev` | Ambiente (tags e naming) |
-
----
+| `bucket_name` | `meu-datalake-mesh` | Nome do bucket (único globalmente) |
+| `project_name` | `data-mesh` | Tags e naming |
+| `environment` | `dev` | Tags e naming |
 
 ## Tags padrão
-
-Todos os recursos recebem:
 
 ```
 Project     = data-mesh
 Environment = dev
+Domain      = vendas | rh   (recursos por domínio)
 ```
 
-Definidas via `default_tags` no provider AWS (`versions.tf`) e reforçadas nos módulos.
+Definidas via `default_tags` no provider (`versions.tf`) e reforçadas nos módulos.

@@ -32,3 +32,23 @@ output "rh_db_name" {
   description = "Name of the Glue Catalog database for the RH domain"
   value       = module.glue.rh_db_name
 }
+
+output "glue_job_vendas_name" {
+  description = "Name of the Glue job for Vendas por categoria"
+  value       = module.glue.glue_job_vendas_name
+}
+
+output "glue_job_rh_name" {
+  description = "Name of the Glue job for RH funcionarios"
+  value       = module.glue.glue_job_rh_name
+}
+
+output "crawler_vendas_name" {
+  description = "Name of the Glue crawler for the Vendas domain"
+  value       = module.glue.crawler_vendas_name
+}
+
+output "crawler_rh_name" {
+  description = "Name of the Glue crawler for the RH domain"
+  value       = module.glue.crawler_rh_name
+}
