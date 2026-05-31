@@ -1,0 +1,19 @@
+variable "bucket_name" {
+  description = "Name of the S3 data lake bucket"
+  type        = string
+}
+
+variable "bucket_arn" {
+  description = "ARN of the S3 data lake bucket"
+  type        = string
+}
+
+variable "project_name" {
+  description = "Project name used for resource naming and tags"
+  type        = string
+}
+
+variable "environment" {
+  description = "Deployment environment used for resource naming and tags"
+  type        = string
+}
