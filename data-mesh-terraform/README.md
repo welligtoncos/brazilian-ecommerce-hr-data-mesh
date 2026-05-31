@@ -78,6 +78,108 @@ Este repositório modela um cenário típico e mostra como a AWS organiza isso d
 
 ---
 
+## Glue Jobs — como funcionam
+
+Os scripts PySpark ficam em `data/` (enviados ao S3 em `scripts/`) e são executados pelos jobs Glue. Cada domínio tem **um job** que lê CSV em `raw/`, transforma e grava **Parquet** em `refined/`.
+
+```
+  VENDAS                              RH
+  ──────                              ──
+  order_items.csv ──┐                 WA_Fn-UseC_...csv
+  products.csv ─────┼─► vendas-por-    ──► rh-funcionarios
+                    │   categoria          (1 linha / funcionário)
+                    ▼
+              Parquet agregado          Parquet detalhado
+              (por categoria)           (por employee_id)
+```
+
+| Job Glue | Script | Entrada (S3) | Saída (S3) | Tabela Athena |
+|----------|--------|--------------|------------|---------------|
+| `vendas-por-categoria` | `job_vendas_por_categoria.py` | `dominio=vendas/raw/order_items/` + `products/` | `dominio=vendas/refined/vendas_por_categoria/` | `vendas_db.vendas_por_categoria` |
+| `rh-funcionarios` | `job_rh_funcionarios.py` | `dominio=rh/raw/funcionarios/` | `dominio=rh/refined/funcionarios/` | `rh_db.funcionarios` |
+
+---
+
+### Job `vendas-por-categoria` (Olist)
+
+**Objetivo:** agregar vendas por **categoria de produto** (camada analítica, menos linhas que o raw).
+
+**Entradas (apenas 2 CSVs do pacote Olist):**
+
+| Arquivo | Colunas usadas |
+|---------|----------------|
+| `olist_order_items_dataset.csv` | `product_id`, `order_item_id`, `price` |
+| `olist_products_dataset.csv` | `product_id`, `product_category_name` |
+
+**Lógica (PySpark):**
+
+1. Lê os CSVs (com aspas `"`, padrão Olist).
+2. `INNER JOIN` em `product_id` (só itens com produto catalogado).
+3. Converte `price` para `double`.
+4. `GROUP BY product_category_name`:
+   - **`total_receita`** = `SUM(price)` — soma do preço de todos os itens da categoria.
+   - **`qtd_itens`** = `COUNT(order_item_id)` — quantidade de itens vendidos.
+5. Grava Parquet (`overwrite`) em `refined/vendas_por_categoria/`.
+
+**Exemplo:** 1 item perfumaria com `price = 58,90` → uma linha: `perfumaria`, `58.9`, `1`.
+
+**Dataset real validado:** 74 categorias, receita total ~R$ 13,6 mi.
+
+**O job não usa:** `freight_value`, `olist_orders_dataset`, clientes, vendedores, pagamentos ou reviews.
+
+---
+
+### Job `rh-funcionarios` (RH)
+
+**Objetivo:** padronizar o CSV de RH para o schema do data mesh (português + colunas para analytics e Lake Formation).
+
+**Entrada:** `WA_Fn-UseC_-HR-Employee-Attrition.csv` (1 linha = 1 funcionário).
+
+**Não há `GROUP BY` no Glue** — mantém uma linha por pessoa. Agregações (`AVG`, `COUNT`) ficam para o **Athena** (ex.: query cross-domínio).
+
+**Transformações:**
+
+| Coluna de saída | Como é calculada |
+|-----------------|------------------|
+| `employee_id` | `EmployeeNumber` se existir; senão **SHA-256** de `Age\|Department\|MonthlyIncome\|YearsAtCompany\|Attrition` |
+| `departamento` | `Department` |
+| `cargo` | `JobRole` ou, se ausente, `EducationField` (ex.: *Life Sciences*) |
+| `idade` | `Age` |
+| `genero` | `Gender` ou `"N/D"` |
+| `anos_empresa` | `YearsAtCompany` |
+| `satisfacao` | `JobSatisfaction` |
+| `rotatividade` | `Attrition` (`Yes` / `No`) |
+| `faixa_salarial` | De `MonthlyIncome`: menor que 5000 → `baixa`; menor que 10000 → `media`; senão `alta` |
+| `total_funcionarios` | Constante **1** (facilita `SUM` no Athena) |
+| `total_saidas` | **1** se `rotatividade = Yes`, senão **0** |
+| `media_satisfacao` | `satisfacao` em `double` (para `AVG` no Athena) |
+| `media_anos_empresa` | `anos_empresa` em `double` |
+| `data_carga` | Data da execução do job |
+
+Colunas presentes na planilha mas **ignoradas** pelo ETL (`WorkLifeBalance`, `EnvironmentSatisfaction`, etc.) permanecem só no CSV raw.
+
+**Dataset real validado:** 1470 funcionários, 3 departamentos.
+
+> A coluna `faixa_salarial` existe no Parquet, mas a role `role-analytics` **não** tem grant LF nessa coluna (column-level security).
+
+---
+
+### Glue vs Athena — quem calcula o quê?
+
+| Camada | Responsável | Exemplo |
+|--------|-------------|---------|
+| **Refined (Glue)** | Jobs acima | `total_receita` por categoria; `faixa_salarial` por funcionário |
+| **Consumo (Athena)** | SQL + `role-analytics` | `SUM(total_receita)` cross-domínio; `AVG(satisfacao)` por departamento; join vendas × RH |
+
+A query `scripts/queries/cross-domain-vendas-rh.sql` lê as tabelas refined e:
+
+1. Mapeia categoria Olist → departamento (tabela fixa no SQL).
+2. Agrega receita e itens por departamento.
+3. Agrega satisfação e contagem de funcionários por departamento.
+4. Faz `LEFT JOIN` vendas × RH no departamento.
+
+---
+
 ## Pré-requisitos
 
 ### Software
@@ -221,6 +323,8 @@ terraform apply "plan.out"
 O Terraform detecta mudanças via `filemd5()` e atualiza os objetos no S3.
 
 ### 2. Executar Glue Jobs
+
+Detalhes dos cálculos: seção [Glue Jobs — como funcionam](#glue-jobs--como-funcionam).
 
 ```powershell
 aws glue start-job-run --job-name vendas-por-categoria
